@@ -5,13 +5,12 @@ from machine import ADC, Pin, Signal
 
 import uasyncio as asyncio
 from mqtt_as.mqtt_as import MQTTClient
-from mqtt_config import mqtt_config
 
 
 class Irrigation:
     """Main class of irrigation system"""
 
-    def __init__(self, plants, debug=False):
+    def __init__(self, plants, mqtt_config, pump_pin=26,debug=False,):
         """Setup"""
         print("Setting up irrigation system")
         self.running = False
@@ -29,9 +28,11 @@ class Irrigation:
 
         # Set up plants
         self.plants = plants
+        for plant in self.plants: 
+            plant.define_mqtt_client(self.mqtt_client)
 
         # Set up pump
-        self.pump_pin = Signal(Pin(26, Pin.OUT), invert=True)
+        self.pump_pin = Signal(Pin(pump_pin, Pin.OUT), invert=True)
 
         # Set up loop time
         self.loop_time_ms = 1000.0 * 60
@@ -245,8 +246,7 @@ class Plant:
         self,
         sensor_pin_no: int,
         valve_pin_no: int,
-        name: str,
-        mqtt_client: MQTTClient,
+        name: str,        
         state_topic: str,
         threshold_topic: str,
         time_topic: str,
@@ -275,7 +275,7 @@ class Plant:
         self.pin_valve.off()
 
         # MQTT
-        self.mqtt_client = mqtt_client
+        self.mqtt_client = None
         self.state_topic = state_topic
         self.threshold_topic = threshold_topic
         self.time_topic = time_topic
@@ -342,6 +342,9 @@ class Plant:
         self.watering = False
         print(f"Finished watering {self.name}")
 
+    def define_mqtt_client(self,mqtt_client: MQTTClient):
+        self.mqtt_client = mqtt_client
+        
     def exit_gracefully(self):
         print(f"Shutting down {self.name}")
         self.pin_valve.off()
