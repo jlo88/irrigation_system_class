@@ -28,7 +28,7 @@ class Irrigation:
 
         # Set up plants
         self.plants = plants
-        for plant in self.plants: 
+        for plant in self.plants:
             plant.define_mqtt_client(self.mqtt_client)
 
         # Set up pump
@@ -246,7 +246,7 @@ class Plant:
         self,
         sensor_pin_no: int,
         valve_pin_no: int,
-        name: str,        
+        name: str,
         state_topic: str,
         threshold_topic: str,
         time_topic: str,
@@ -344,7 +344,7 @@ class Plant:
 
     def define_mqtt_client(self,mqtt_client: MQTTClient):
         self.mqtt_client = mqtt_client
-        
+
     def exit_gracefully(self):
         print(f"Shutting down {self.name}")
         self.pin_valve.off()
