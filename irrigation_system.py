@@ -1,5 +1,6 @@
 """Contains the irrigation system program"""
 import json
+import network
 from utime import ticks_diff, ticks_ms
 from machine import ADC, Pin, Signal
 
@@ -10,7 +11,7 @@ from mqtt_as.mqtt_as import MQTTClient
 class Irrigation:
     """Main class of irrigation system"""
 
-    def __init__(self, plants, mqtt_config, pump_pin=26,debug=False,switch_topic="irrigation_system/irrigation_system/switch"):
+    def __init__(self, plants, mqtt_config, pump_pin=26,debug=False,switch_topic="irrigation_system/switch"):
         """Setup"""
         print("Setting up irrigation system")
         self.running = False
@@ -312,6 +313,7 @@ class Plant:
             "moisture": self.moisture,
             "moisture_bits": self.reading_bits,
             "name": self.name,
+            "ip": network.WLAN().ifconfig()[0],
         }
         await self.mqtt_client.publish(
             topic=self.state_topic,
