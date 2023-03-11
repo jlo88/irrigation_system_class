@@ -10,7 +10,7 @@ from mqtt_as.mqtt_as import MQTTClient
 class Irrigation:
     """Main class of irrigation system"""
 
-    def __init__(self, plants, mqtt_config, pump_pin=26,debug=False,):
+    def __init__(self, plants, mqtt_config, pump_pin=26,debug=False,switch_topic="irrigation_system/irrigation_system/switch"):
         """Setup"""
         print("Setting up irrigation system")
         self.running = False
@@ -19,7 +19,7 @@ class Irrigation:
         # Set up MQTT connection
         mqtt_config["subs_cb"] = self.mqtt_message_received
         mqtt_config["connect_coro"] = self.mqtt_connect
-        self.mqtt_state_topic = "irrigation_system/switch"
+        self.mqtt_state_topic = switch_topic
         self.mqtt_command_topic = self.mqtt_state_topic + "/set"
         self.mqtt_available_topic = self.mqtt_state_topic + "/available"
         print(f"Setting up mqtt connection with cofiguration: {mqtt_config}")
