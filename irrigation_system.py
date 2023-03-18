@@ -33,6 +33,8 @@ class Irrigation:
             plant.define_mqtt_client(self.mqtt_client)
 
         # Set up pump
+        if pump_pin == 12:
+            Exception('Please do not connect the pump pin to 12, this will cause reboot problems')            
         self.pump_pin = Signal(Pin(pump_pin, Pin.OUT), invert=True)
 
         # Set up loop time
@@ -268,10 +270,16 @@ class Plant:
         self.watering = False
 
         # Pins
+        allowed_adc_pins = list(range(32,40))
+        if sensor_pin_no not in allowed_adc_pins:
+            Exception(f"Sensor pin can only be attached to {allowed_adc_pins} but trying to attach to {sensor_pin_no}")
         self.pin_sensor = ADC(Pin(sensor_pin_no, Pin.IN))
         self.pin_sensor.atten(
             ADC.ATTN_11DB
         )  # Set up attenuation so we have a range of 0V ... 3.3V
+        forbidden_pins = [12]
+        if valve_pin_no in forbidden_pins:
+            Exception(f"Valve pin cannot be attached to {forbidden_pins} but trying to attach to {valve_pin_no}")        
         self.pin_valve = Signal(Pin(valve_pin_no, Pin.OUT), invert=True)
         self.pin_valve.off()
 
@@ -324,6 +332,10 @@ class Plant:
 
     async def check_if_dry(self):
         """Checks if a plant is dry"""
+        if self.watering_threshold_pct is None:
+            print('Cannot read because watering threshold is set to None')
+            return
+        
         await self.read()
         return self.moisture < self.watering_threshold_pct
 
@@ -336,13 +348,16 @@ class Plant:
             )
             return
 
-        print(f"Watering {self.name} for {self.watering_time_s} seconds")
-        self.pin_valve.on()
-        self.watering = True
-        await asyncio.sleep(self.watering_time_s)
-        self.pin_valve.off()
-        self.watering = False
-        print(f"Finished watering {self.name}")
+        if self.watering_time_s is not None:
+            print(f"Watering {self.name} for {self.watering_time_s} seconds")
+            self.pin_valve.on()
+            self.watering = True
+            await asyncio.sleep(self.watering_time_s)
+            self.pin_valve.off()
+            self.watering = False
+            print(f"Finished watering {self.name}")
+        else:
+            print("Cannot water because watering time is set to None")
 
     def define_mqtt_client(self,mqtt_client: MQTTClient):
         self.mqtt_client = mqtt_client
