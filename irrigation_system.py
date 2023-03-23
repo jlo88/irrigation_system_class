@@ -11,7 +11,7 @@ from mqtt_as.mqtt_as import MQTTClient
 class Irrigation:
     """Main class of irrigation system"""
 
-    def __init__(self, plants, mqtt_config, pump_pin=26,debug=False,switch_topic="irrigation_system/switch"):
+    def __init__(self, plants, mqtt_config, pump_pin=26,debug=False,switch_topic="irrigation_system/switch",water_level_pin=None,water_level_topic="irrigation_system/water_empty",):
         """Setup"""
         print("Setting up irrigation system")
         self.running = False
@@ -34,9 +34,29 @@ class Irrigation:
 
         # Set up pump
         if pump_pin == 12:
-            Exception('Please do not connect the pump pin to 12, this will cause reboot problems')            
+            Exception('Please do not connect the pump pin to 12, this will cause reboot problems')
         self.pump_pin = Signal(Pin(pump_pin, Pin.OUT), invert=True)
 
+        # Set up water level pin
+        self.water_level_pin = water_level_pin
+        self.water_level_topic = None
+        self.water_level_topic_availability = None
+        if self.water_level_pin is not None:
+            # Check if not used by plants
+            plant_pins = []
+            for plant in self.plants:
+                plant_pins.append(plant.sensor_pin_no)
+                plant_pins.append(plant.valve_pin_no)
+            if self.water_level_pin in plant_pins:
+                Exception(f'Pin {self.water_level_pin} is already occupied and cannot be used for checking the water level')
+
+            # Set pull up:
+            self.water_level_pin = Pin(self.water_level_pin, Pin.IN, Pin.PULL_UP)
+
+            # Set MQTT topic
+            self.water_level_topic = water_level_topic
+            self.water_level_topic_availability = f"{self.water_level_topic}/availability"
+            
         # Set up loop time
         self.loop_time_ms = 1000.0 * 60
 
@@ -141,6 +161,9 @@ class Irrigation:
             self.printd(f"Reading plant #{n}")
             await plant.read()
 
+        # Read water level
+        self.check_water_level()
+
     def run(self):
         """Runs the motion loop and mqtt client"""
         self.running = True
@@ -183,7 +206,15 @@ class Irrigation:
             )
             return
 
-        # TODO: check water level
+        # check water level
+        if self.water_level_pin is not None:
+            if not self.check_water_level():
+                print("Water is empty, aborting watering sequence")
+                self.finish_watering()
+                return
+            else:
+                print("Water level OK")
+
 
         print("Switching on pump")
         self.pump_pin.on()
@@ -200,14 +231,38 @@ class Irrigation:
         print("Finished watering sequence")
         self.finish_watering()
 
+    def check_water_level(self): 
+        """Check if there is water in the reservoir"""
+        # Set sensor online
+        self.event_loop.create_task(
+            self.mqtt_client.publish(
+                self.water_level_topic_availability, "online", retain=True
+            )
+        )      
+        if self.water_level_pin.value() == 0: 
+            print("Publish water empty")
+            self.event_loop.create_task(
+            self.mqtt_client.publish(self.water_level_topic, "ON", retain=True)
+            )
+            return False
+        else:
+            print("Publish water full")
+            self.event_loop.create_task(
+            self.mqtt_client.publish(self.water_level_topic, "ON", retain=True)
+            )
+            return True
+
     def finish_watering(self):
         """Finished the watering sequence"""
+        print("Finishing watering sequence")
         self.watering = False
 
         # Switch off pump
+        print("Switching off pump")
         self.pump_pin.off()
 
         # Publish watering state off
+        print("Publish watering status off")
         self.event_loop.create_task(
             self.mqtt_client.publish(self.mqtt_state_topic, "OFF", retain=True)
         )
@@ -236,6 +291,11 @@ class Irrigation:
                 topic=self.mqtt_available_topic, msg="offline", retain=True
             )
         )
+        self.event_loop.create_task(
+            self.mqtt_client.publish(
+                self.water_level_topic_availability, "online", retain=True
+            )
+        )          
         self.mqtt_client.disconnect()
         print("Done")
 
@@ -273,11 +333,13 @@ class Plant:
         allowed_adc_pins = list(range(32,40))
         if sensor_pin_no not in allowed_adc_pins:
             Exception(f"Sensor pin can only be attached to {allowed_adc_pins} but trying to attach to {sensor_pin_no}")
+        self.sensor_pin_no = sensor_pin_no
         self.pin_sensor = ADC(Pin(sensor_pin_no, Pin.IN))
         self.pin_sensor.atten(
             ADC.ATTN_11DB
         )  # Set up attenuation so we have a range of 0V ... 3.3V
         forbidden_pins = [12]
+        self.valve_pin_no = valve_pin_no
         if valve_pin_no in forbidden_pins:
             Exception(f"Valve pin cannot be attached to {forbidden_pins} but trying to attach to {valve_pin_no}")        
         self.pin_valve = Signal(Pin(valve_pin_no, Pin.OUT), invert=True)
