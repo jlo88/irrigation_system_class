@@ -7,6 +7,7 @@ from machine import ADC, Pin, Signal
 import uasyncio as asyncio
 from mqtt_as.mqtt_as import MQTTClient
 
+# pylint: disable=broad-exception-raised
 
 class Irrigation:
     """Main class of irrigation system"""
@@ -34,7 +35,7 @@ class Irrigation:
 
         # Set up pump
         if pump_pin == 12:
-            Exception('Please do not connect the pump pin to 12, this will cause reboot problems')
+            raise Exception('Please do not connect the pump pin to 12, this will cause reboot problems')
         self.pump_pin = Signal(Pin(pump_pin, Pin.OUT), invert=True)
 
         # Set up water level pin
@@ -48,7 +49,7 @@ class Irrigation:
                 plant_pins.append(plant.sensor_pin_no)
                 plant_pins.append(plant.valve_pin_no)
             if self.water_level_pin in plant_pins:
-                Exception(f'Pin {self.water_level_pin} is already occupied and cannot be used for checking the water level')
+                raise Exception(f'Pin {self.water_level_pin} is already occupied and cannot be used for checking the water level')
 
             # Set pull up:
             self.water_level_pin = Pin(self.water_level_pin, Pin.IN, Pin.PULL_UP)
@@ -56,7 +57,7 @@ class Irrigation:
             # Set MQTT topic
             self.water_level_topic = water_level_topic
             self.water_level_topic_availability = f"{self.water_level_topic}/availability"
-            
+
         # Set up loop time
         self.loop_time_ms = 1000.0 * 60
 
@@ -231,18 +232,18 @@ class Irrigation:
         print("Finished watering sequence")
         self.finish_watering()
 
-    def check_water_level(self): 
+    def check_water_level(self):
         """Check if there is water in the reservoir"""
         # Set sensor online
         self.event_loop.create_task(
             self.mqtt_client.publish(
                 self.water_level_topic_availability, "online", retain=True
             )
-        )      
-        if self.water_level_pin.value() == 0: 
+        )
+        if self.water_level_pin.value() == 0:
             print("Publish water empty")
             self.event_loop.create_task(
-            self.mqtt_client.publish(self.water_level_topic, "ON", retain=True)
+            self.mqtt_client.publish(self.water_level_topic, "OFF", retain=True)
             )
             return False
         else:
@@ -295,7 +296,7 @@ class Irrigation:
             self.mqtt_client.publish(
                 self.water_level_topic_availability, "online", retain=True
             )
-        )          
+        )
         self.mqtt_client.disconnect()
         print("Done")
 
@@ -323,6 +324,8 @@ class Plant:
         # Calibration values
         self.dry_value = dry_value
         self.wet_value = wet_value
+        self.min_value = 500
+        self.max_value = 3800
 
         # States
         self.moisture = None
@@ -332,7 +335,8 @@ class Plant:
         # Pins
         allowed_adc_pins = list(range(32,40))
         if sensor_pin_no not in allowed_adc_pins:
-            Exception(f"Sensor pin can only be attached to {allowed_adc_pins} but trying to attach to {sensor_pin_no}")
+            raise Exception(f"Sensor pin can only be attached to {allowed_adc_pins} but trying to attach to {sensor_pin_no}")
+
         self.sensor_pin_no = sensor_pin_no
         self.pin_sensor = ADC(Pin(sensor_pin_no, Pin.IN))
         self.pin_sensor.atten(
@@ -341,7 +345,7 @@ class Plant:
         forbidden_pins = [12]
         self.valve_pin_no = valve_pin_no
         if valve_pin_no in forbidden_pins:
-            Exception(f"Valve pin cannot be attached to {forbidden_pins} but trying to attach to {valve_pin_no}")        
+            raise Exception(f"Valve pin cannot be attached to {forbidden_pins} but trying to attach to {valve_pin_no}")
         self.pin_valve = Signal(Pin(valve_pin_no, Pin.OUT), invert=True)
         self.pin_valve.off()
 
@@ -368,6 +372,12 @@ class Plant:
             readings_bit[n] = self.pin_sensor.read()
         self.reading_bits = sum(readings_bit) / self.n_readings
 
+        # Do a range check
+        valid_reading_payload = "ON"
+        if self.reading_bits < self.min_value or self.reading_bits > self.max_value:
+            valid_reading_payload = "OFF"
+            print(f"{self.name} reading is out of range! Got {self.reading_bits} bits but should be between {self.min_value} and {self.max_value}")
+
         # Convert to percentages
         self.moisture = self.map_value(
             self.reading_bits,
@@ -384,6 +394,9 @@ class Plant:
             "moisture_bits": self.reading_bits,
             "name": self.name,
             "ip": network.WLAN().ifconfig()[0],
+            "senor_pin_no": self.sensor_pin_no,
+            "valve_pin_no": self.valve_pin_no,
+            "valid_reading": valid_reading_payload,
         }
         await self.mqtt_client.publish(
             topic=self.state_topic,
@@ -397,7 +410,7 @@ class Plant:
         if self.watering_threshold_pct is None:
             print('Cannot read because watering threshold is set to None')
             return
-        
+
         await self.read()
         return self.moisture < self.watering_threshold_pct
 
