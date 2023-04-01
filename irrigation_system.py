@@ -163,7 +163,8 @@ class Irrigation:
             await plant.read()
 
         # Read water level
-        self.check_water_level()
+        if self.water_level_pin is not None:
+            self.check_water_level()
 
     def run(self):
         """Runs the motion loop and mqtt client"""
@@ -398,6 +399,7 @@ class Plant:
             "valve_pin_no": self.valve_pin_no,
             "valid_reading": valid_reading_payload,
         }
+        print(f"Message to send: {json.dumps(payload_json)}")
         await self.mqtt_client.publish(
             topic=self.state_topic,
             msg=json.dumps(payload_json),
