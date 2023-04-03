@@ -21,10 +21,10 @@ class Irrigation:
         # Set up MQTT connection
         mqtt_config["subs_cb"] = self.mqtt_message_received
         mqtt_config["connect_coro"] = self.mqtt_connect
-        #mqtt_config["wifi_coro"] = self.network_change
-        self.mqtt_state_topic = f"{main_topic}/switch"
-        self.mqtt_command_topic = self.mqtt_state_topic + "/set"
-        self.mqtt_available_topic = self.mqtt_state_topic + "/available"
+        self.mqtt_switch_topic = f"{main_topic}/switch"
+        self.mqtt_switch_command_topic = self.mqtt_switch_topic + "/set"
+        self.mqtt_switch_available_topic = self.mqtt_switch_topic + "/available"
+        self.mqtt_status_topic = main_topic + "/connectivity_status"
         print(f"Setting up mqtt connection with configuration: {mqtt_config}")
         self.mqtt_client = MQTTClient(mqtt_config)
         self.mqtt_client.DEBUG = False
@@ -75,19 +75,12 @@ class Irrigation:
         if self.debug:
             print(msg)
 
-    async def network_change(self, new_state):
-        """Handles changes in the network state"""
-        #if not new_state:
-        #    await asyncio.sleep_ms(int(30000))
-        #    if not network.WLAN(network.STA_IF).isconnected():
-        #        machine.reset()
-
     async def mqtt_connect(self, client):
         """Handles establishing an mqtt connection"""
-        await client.publish(self.mqtt_available_topic, "online", retain=True)
-        await client.subscribe(self.mqtt_command_topic, 1)
+        await client.publish(self.mqtt_switch_available_topic, "online", retain=True)
+        await client.subscribe(self.mqtt_switch_command_topic, 1)
         print(
-            f"Connected to {client.server}, subscribed to {self.mqtt_command_topic} topic"
+            f"Connected to {client.server}, subscribed to {self.mqtt_switch_command_topic} topic"
         )
 
         # Subscribe to threshold and watering time updates
@@ -107,12 +100,12 @@ class Irrigation:
         self.printd(f"Message {payload} received on {topic}")
 
         # Handle watering switch
-        if topic == self.mqtt_command_topic:
+        if topic == self.mqtt_switch_command_topic:
             if payload == "ON" or payload == "OFF":
                 # Publishes back the state, needs to be asynchronous as well:
                 self.event_loop.create_task(
                     self.mqtt_client.publish(
-                        self.mqtt_state_topic, payload, retain=True
+                        self.mqtt_switch_topic, payload, retain=True
                     )
                 )
             if payload == "ON":
@@ -172,11 +165,29 @@ class Irrigation:
         # Read all plants
         for n, plant in enumerate(self.plants):
             self.printd(f"Reading plant #{n}")
-            await plant.read()
+            try:
+                await plant.read()
+            except Exception as e:
+                print(f"Failed to read plant {n} because of {e}")
 
         # Read water level
-        if self.water_level_pin is not None:
-            self.check_water_level()
+        try:
+            if self.water_level_pin is not None:
+                self.check_water_level()
+        except Exception as e:
+            print(f"Failed to check water level because of {e}")
+
+        # Read connectivity
+        try:
+            payload_json = {
+                "ip": network.WLAN().ifconfig()[0],
+                "rssi": network.WLAN().status("rssi"),
+            }
+            self.event_loop.create_task(
+                self.mqtt_client.publish(self.mqtt_status_topic, json.dumps(payload_json), retain=True)
+            )
+        except Exception as e:
+            print(f'Failed to read connectivity because of {e}')
 
     def run(self):
         """Runs the motion loop and mqtt client"""
@@ -226,7 +237,7 @@ class Irrigation:
             self.watering = False
             # Publish watering state off
             self.event_loop.create_task(
-                self.mqtt_client.publish(self.mqtt_state_topic, "OFF", retain=True)
+                self.mqtt_client.publish(self.mqtt_switch_topic, "OFF", retain=True)
             )
             return
 
@@ -278,7 +289,7 @@ class Irrigation:
         # Publish watering state off
         print("Publish watering status off")
         self.event_loop.create_task(
-            self.mqtt_client.publish(self.mqtt_state_topic, "OFF", retain=True)
+            self.mqtt_client.publish(self.mqtt_switch_topic, "OFF", retain=True)
         )
         return
 
@@ -302,7 +313,7 @@ class Irrigation:
         print("Disconnecting from mqtt")
         self.event_loop.run_until_complete(
             self.mqtt_client.publish(
-                topic=self.mqtt_available_topic, msg="offline", retain=True
+                topic=self.mqtt_switch_available_topic, msg="offline", retain=True
             )
         )
         self.event_loop.create_task(
@@ -403,11 +414,9 @@ class Plant:
 
         # Publish state over mqtt:
         payload_json = {
-            "ip": network.WLAN().ifconfig()[0],
             "moisture_bits": self.reading_bits,
             "moisture": self.moisture,
             "name": self.name,
-            "rssi": network.WLAN().status("rssi"),
             "sensor_pin_no": self.sensor_pin_no,
             "valid_reading": valid_reading_payload,
             "valve_pin_no": self.valve_pin_no,
