@@ -21,10 +21,11 @@ class Irrigation:
         # Set up MQTT connection
         mqtt_config["subs_cb"] = self.mqtt_message_received
         mqtt_config["connect_coro"] = self.mqtt_connect
+        #mqtt_config["wifi_coro"] = self.network_change
         self.mqtt_state_topic = switch_topic
         self.mqtt_command_topic = self.mqtt_state_topic + "/set"
         self.mqtt_available_topic = self.mqtt_state_topic + "/available"
-        print(f"Setting up mqtt connection with cofiguration: {mqtt_config}")
+        print(f"Setting up mqtt connection with configuration: {mqtt_config}")
         self.mqtt_client = MQTTClient(mqtt_config)
         self.mqtt_client.DEBUG = False
 
@@ -73,6 +74,13 @@ class Irrigation:
     def printd(self, msg):
         if self.debug:
             print(msg)
+
+    async def network_change(self, new_state):
+        """Handles changes in the network state"""
+        #if not new_state:
+        #    await asyncio.sleep_ms(int(30000))
+        #    if not network.WLAN(network.STA_IF).isconnected():
+        #        machine.reset()
 
     async def mqtt_connect(self, client):
         """Handles establishing an mqtt connection"""
@@ -156,7 +164,6 @@ class Irrigation:
 
     async def sensor_reading_loop(self):
         """Runs a sensor reading loop"""
-
         # Read all plants
         for n, plant in enumerate(self.plants):
             self.printd(f"Reading plant #{n}")
@@ -189,6 +196,16 @@ class Irrigation:
 
     async def water(self):
         """Check if any plants are dry and water those"""
+        # check water level
+        if self.water_level_pin is not None:
+            if not self.check_water_level():
+                print("Water is empty, aborting watering sequence")
+                self.finish_watering()
+                return
+            else:
+                print("Water level OK")
+
+
         self.watering = True
         print("Checking if any plants are dry")
         for n, plant in enumerate(self.plants):
@@ -207,16 +224,6 @@ class Irrigation:
                 self.mqtt_client.publish(self.mqtt_state_topic, "OFF", retain=True)
             )
             return
-
-        # check water level
-        if self.water_level_pin is not None:
-            if not self.check_water_level():
-                print("Water is empty, aborting watering sequence")
-                self.finish_watering()
-                return
-            else:
-                print("Water level OK")
-
 
         print("Switching on pump")
         self.pump_pin.on()
@@ -391,18 +398,20 @@ class Plant:
 
         # Publish state over mqtt:
         payload_json = {
-            "moisture": self.moisture,
-            "moisture_bits": self.reading_bits,
-            "name": self.name,
             "ip": network.WLAN().ifconfig()[0],
-            "senor_pin_no": self.sensor_pin_no,
-            "valve_pin_no": self.valve_pin_no,
+            "moisture_bits": self.reading_bits,
+            "moisture": self.moisture,
+            "name": self.name,
+            "rssi": network.WLAN().status("rssi"),
+            "sensor_pin_no": self.sensor_pin_no,
             "valid_reading": valid_reading_payload,
+            "valve_pin_no": self.valve_pin_no,
         }
         print(f"Message to send: {json.dumps(payload_json)}")
         await self.mqtt_client.publish(
             topic=self.state_topic,
             msg=json.dumps(payload_json),
+            retain=True,
         )
 
         return self.moisture
