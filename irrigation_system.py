@@ -12,7 +12,7 @@ from mqtt_as.mqtt_as import MQTTClient
 class Irrigation:
     """Main class of irrigation system"""
 
-    def __init__(self, plants, mqtt_config, pump_pin=26,debug=False,switch_topic="irrigation_system/switch",water_level_pin=None,water_level_topic="irrigation_system/water_empty",):
+    def __init__(self, plants, mqtt_config, pump_pin=26,debug=False,main_topic="irrigation_system",water_level_pin=None,):
         """Setup"""
         print("Setting up irrigation system")
         self.running = False
@@ -22,7 +22,7 @@ class Irrigation:
         mqtt_config["subs_cb"] = self.mqtt_message_received
         mqtt_config["connect_coro"] = self.mqtt_connect
         #mqtt_config["wifi_coro"] = self.network_change
-        self.mqtt_state_topic = switch_topic
+        self.mqtt_state_topic = f"{main_topic}/switch"
         self.mqtt_command_topic = self.mqtt_state_topic + "/set"
         self.mqtt_available_topic = self.mqtt_state_topic + "/available"
         print(f"Setting up mqtt connection with configuration: {mqtt_config}")
@@ -56,7 +56,7 @@ class Irrigation:
             self.water_level_pin = Pin(self.water_level_pin, Pin.IN, Pin.PULL_UP)
 
             # Set MQTT topic
-            self.water_level_topic = water_level_topic
+            self.water_level_topic = f"{main_topic}/water_empty"
             self.water_level_topic_availability = f"{self.water_level_topic}/availability"
 
         # Set up loop time
@@ -146,6 +146,11 @@ class Irrigation:
         while self.running:
             # Get starting time
             start = ticks_ms()
+
+            # Wait until connected
+            while not self.mqtt_client.isconnected():
+                print("Waiting for MQTT connection, waiting 1s")
+                await asyncio.sleep_ms(1000)
 
             await self.sensor_reading_loop()
 
