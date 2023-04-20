@@ -2,17 +2,30 @@
 import json
 import network
 from utime import ticks_diff, ticks_ms
-from machine import ADC, Pin, Signal
+from machine import ADC, Pin, Signal, deepsleep
 
 import uasyncio as asyncio
 from mqtt_as.mqtt_as import MQTTClient
 
 # pylint: disable=broad-exception-raised
 
+
 class Irrigation:
     """Main class of irrigation system"""
 
-    def __init__(self, plants, mqtt_config, pump_pin=26,debug=False,main_topic="irrigation_system",water_level_pin=None,):
+    def __init__(
+        self,
+        plants,
+        mqtt_config,
+        pump_pin=26,
+        debug=False,
+        main_topic="irrigation_system",
+        water_level_pin=None,
+        battery_voltage_pin=None,
+        battery_voltage_multiplier=12 / 4096,
+        n_readings=100,
+        developer_mode=False,
+    ):
         """Setup"""
         print("Setting up irrigation system")
         self.running = False
@@ -22,9 +35,12 @@ class Irrigation:
         mqtt_config["subs_cb"] = self.mqtt_message_received
         mqtt_config["connect_coro"] = self.mqtt_connect
         self.mqtt_switch_topic = f"{main_topic}/switch"
+        self.mqtt_energy_saver_topic = f"{main_topic}/energy_saver_switch"
+        self.mqtt_energy_saver_command_topic = f"{self.mqtt_energy_saver_topic}/set"
         self.mqtt_switch_command_topic = self.mqtt_switch_topic + "/set"
         self.mqtt_switch_available_topic = self.mqtt_switch_topic + "/available"
         self.mqtt_status_topic = main_topic + "/connectivity_status"
+        self.mqtt_battry_level_topic = main_topic + "battery_level"
         print(f"Setting up mqtt connection with configuration: {mqtt_config}")
         self.mqtt_client = MQTTClient(mqtt_config)
         self.mqtt_client.DEBUG = False
@@ -34,9 +50,17 @@ class Irrigation:
         for plant in self.plants:
             plant.define_mqtt_client(self.mqtt_client)
 
+        # Get occupied pins:
+        plant_pins = []
+        for plant in self.plants:
+            plant_pins.append(plant.sensor_pin_no)
+            plant_pins.append(plant.valve_pin_no)
+
         # Set up pump
         if pump_pin == 12:
-            raise Exception('Please do not connect the pump pin to 12, this will cause reboot problems')
+            raise Exception(
+                "Please do not connect the pump pin to 12, this will cause reboot problems"
+            )
         self.pump_pin = Signal(Pin(pump_pin, Pin.OUT), invert=True)
 
         # Set up water level pin
@@ -44,20 +68,25 @@ class Irrigation:
         self.water_level_topic = None
         self.water_level_topic_availability = None
         if self.water_level_pin is not None:
-            # Check if not used by plants
-            plant_pins = []
-            for plant in self.plants:
-                plant_pins.append(plant.sensor_pin_no)
-                plant_pins.append(plant.valve_pin_no)
             if self.water_level_pin in plant_pins:
-                raise Exception(f'Pin {self.water_level_pin} is already occupied and cannot be used for checking the water level')
+                raise Exception(
+                    f"Pin {self.water_level_pin} is already occupied and cannot be used for checking the water level"
+                )
 
             # Set pull up:
             self.water_level_pin = Pin(self.water_level_pin, Pin.IN, Pin.PULL_UP)
 
             # Set MQTT topic
             self.water_level_topic = f"{main_topic}/water_empty"
-            self.water_level_topic_availability = f"{self.water_level_topic}/availability"
+            self.water_level_topic_availability = (
+                f"{self.water_level_topic}/availability"
+            )
+
+        # Set up energy saving mode
+        self.energy_saving_mode = False
+
+        # Set up developer mode
+        self.developer_mode = developer_mode
 
         # Set up loop time
         self.loop_time_ms = 1000.0 * 60
@@ -70,6 +99,28 @@ class Irrigation:
 
         # Watering task
         self.watering_task = None
+
+        # Battery voltage
+        if battery_voltage_pin is not None:
+            allowed_adc_pins = list(range(32, 40))
+            if battery_voltage_pin not in allowed_adc_pins:
+                raise Exception(
+                    f"Battery sensor pin can only be attached to {allowed_adc_pins} but trying "
+                    * f"to attach to {battery_voltage_pin}"
+                )
+            if battery_voltage_pin in plant_pins:
+                raise Exception(
+                    f"Pin {battery_voltage_pin} is already occupied and cannot "
+                    + "be used for checking the battery voltage"
+                )
+        self.battery_voltage_multiplier = battery_voltage_multiplier
+        self.battery_voltage_pin = ADC(Pin(battery_voltage_pin, Pin.IN))
+        self.battery_voltage_pin.atten(
+            ADC.ATTN_11DB
+        )  # Set up attenuation so we have a range of 0.15V ... 2.45V
+        self.n_readings = n_readings
+        self.battery_voltage_bits = None
+        self.battery_voltage = None
 
     def printd(self, msg):
         if self.debug:
@@ -89,6 +140,9 @@ class Irrigation:
             print(f"Subscribed to {plant.threshold_topic}")
             await client.subscribe(plant.time_topic, 1)
             print(f"Subscribed to {plant.time_topic}")
+
+        # Subscribe to energy saving mode switch
+        await client.subscribe(self.mqtt_energy_saver_command_topic, 1)
 
     def mqtt_message_received(self, topic, payload, _):
         """Handles received mqtt messages"""
@@ -124,6 +178,27 @@ class Irrigation:
             if plant.check_message(topic, payload):
                 return
 
+        # Handle energy saving mode update:
+        if topic == self.mqtt_energy_saver_command_topic:
+            if payload == "ON" or payload == "OFF":
+                # Publishes back the state, needs to be asynchronous as well:
+                self.event_loop.create_task(
+                    self.mqtt_client.publish(
+                        self.mqtt_energy_saver_topic, payload, retain=True
+                    )
+                )
+            self.energy_saving_mode = payload == "ON"
+            if payload == "ON":
+                self.energy_saving_mode = True
+                return
+            elif payload == "OFF":
+                self.energy_saving_mode = False
+                return
+            else:
+                print(
+                    f"Got an unexpected payload: {payload} on topic {topic}, expected 'ON' or 'OFF'"
+                )
+
         # When we arrive here the payload on this topic was not processed:
         print(f"Warning, not able to process topic {topic} with payload {payload}")
 
@@ -147,7 +222,7 @@ class Irrigation:
 
             await self.sensor_reading_loop()
 
-            # Sleep to maintain loop time
+            # Calculate sleep time
             elapsed_time_ms = ticks_diff(ticks_ms(), start)
             sleep_time_ms = self.loop_time_ms - elapsed_time_ms
             if sleep_time_ms < 0.0:
@@ -155,10 +230,15 @@ class Irrigation:
                     f"Loop is too slow to still be able to communicate, got elapsed time {elapsed_time_ms:.1f} [ms], "
                     + f"increase loop time to at least {elapsed_time_ms:.1f} [ms] to be able to still communicate"
                 )
-                await asyncio.sleep_ms(int(self.loop_time_ms))
+                sleep_time_ms = self.loop_time_ms
+
+            # Go to deep-sleep in the energy saving mode
+            if self.energy_saving_mode and not self.developer_mode:
+                self.printd(f"Deep sleeping for {sleep_time_ms} [ms]")
+                deepsleep(int(self.loop_time_ms))
             else:
                 self.printd(f"Sleeping for {sleep_time_ms} [ms]")
-                await asyncio.sleep_ms(int(sleep_time_ms))
+                await asyncio.sleep_ms(int(self.loop_time_ms))
 
     async def sensor_reading_loop(self):
         """Runs a sensor reading loop"""
@@ -177,6 +257,31 @@ class Irrigation:
         except Exception as e:
             print(f"Failed to check water level because of {e}")
 
+        # Rea battery level
+        if self.battery_voltage_pin:
+            try:
+                # Read ADC and average:
+                readings_bit = [[]] * self.n_readings
+                for n, _ in enumerate(readings_bit):
+                    readings_bit[n] = self.battery_voltage_pin.read()
+                self.battery_voltage_bits = sum(readings_bit) / self.n_readings
+                self.battery_voltage = (
+                    self.battery_voltage_multiplier * self.battery_voltage_bits
+                )
+                payload_json = {
+                    "value": self.battery_voltage,
+                    "bits": self.battery_voltage_bits,
+                }
+                self.event_loop.create_task(
+                    self.mqtt_client.publish(
+                        self.mqtt_battry_level_topic,
+                        json.dumps(payload_json),
+                        retain=True,
+                    )
+                )
+            except Exception as e:
+                print(f"Failed to read battery level because of {e}")
+
         # Read connectivity
         try:
             payload_json = {
@@ -184,10 +289,12 @@ class Irrigation:
                 "rssi": network.WLAN().status("rssi"),
             }
             self.event_loop.create_task(
-                self.mqtt_client.publish(self.mqtt_status_topic, json.dumps(payload_json), retain=True)
+                self.mqtt_client.publish(
+                    self.mqtt_status_topic, json.dumps(payload_json), retain=True
+                )
             )
         except Exception as e:
-            print(f'Failed to read connectivity because of {e}')
+            print(f"Failed to read connectivity because of {e}")
 
     def run(self):
         """Runs the motion loop and mqtt client"""
@@ -220,7 +327,6 @@ class Irrigation:
                 return
             else:
                 print("Water level OK")
-
 
         self.watering = True
         print("Checking if any plants are dry")
@@ -267,13 +373,13 @@ class Irrigation:
         if self.water_level_pin.value() == 0:
             print("Publish water empty")
             self.event_loop.create_task(
-            self.mqtt_client.publish(self.water_level_topic, "OFF", retain=True)
+                self.mqtt_client.publish(self.water_level_topic, "OFF", retain=True)
             )
             return False
         else:
             print("Publish water full")
             self.event_loop.create_task(
-            self.mqtt_client.publish(self.water_level_topic, "ON", retain=True)
+                self.mqtt_client.publish(self.water_level_topic, "ON", retain=True)
             )
             return True
 
@@ -357,19 +463,23 @@ class Plant:
         self.watering = False
 
         # Pins
-        allowed_adc_pins = list(range(32,40))
+        allowed_adc_pins = list(range(32, 40))
         if sensor_pin_no not in allowed_adc_pins:
-            raise Exception(f"Sensor pin can only be attached to {allowed_adc_pins} but trying to attach to {sensor_pin_no}")
+            raise Exception(
+                f"Sensor pin can only be attached to {allowed_adc_pins} but trying to attach to {sensor_pin_no}"
+            )
 
         self.sensor_pin_no = sensor_pin_no
         self.pin_sensor = ADC(Pin(sensor_pin_no, Pin.IN))
         self.pin_sensor.atten(
             ADC.ATTN_11DB
-        )  # Set up attenuation so we have a range of 0V ... 3.3V
+        )  # Set up attenuation so we have a range of 0.15V ... 2.45V
         forbidden_pins = [12]
         self.valve_pin_no = valve_pin_no
         if valve_pin_no in forbidden_pins:
-            raise Exception(f"Valve pin cannot be attached to {forbidden_pins} but trying to attach to {valve_pin_no}")
+            raise Exception(
+                f"Valve pin cannot be attached to {forbidden_pins} but trying to attach to {valve_pin_no}"
+            )
         self.pin_valve = Signal(Pin(valve_pin_no, Pin.OUT), invert=True)
         self.pin_valve.off()
 
@@ -400,7 +510,9 @@ class Plant:
         valid_reading_payload = "ON"
         if self.reading_bits < self.min_value or self.reading_bits > self.max_value:
             valid_reading_payload = "OFF"
-            print(f"{self.name} reading is out of range! Got {self.reading_bits} bits but should be between {self.min_value} and {self.max_value}")
+            print(
+                f"{self.name} reading is out of range! Got {self.reading_bits} bits but should be between {self.min_value} and {self.max_value}"
+            )
 
         # Convert to percentages
         self.moisture = self.map_value(
@@ -433,7 +545,7 @@ class Plant:
     async def check_if_dry(self):
         """Checks if a plant is dry"""
         if self.watering_threshold_pct is None:
-            print('Cannot read because watering threshold is set to None')
+            print("Cannot read because watering threshold is set to None")
             return
 
         await self.read()
@@ -459,7 +571,7 @@ class Plant:
         else:
             print("Cannot water because watering time is set to None")
 
-    def define_mqtt_client(self,mqtt_client: MQTTClient):
+    def define_mqtt_client(self, mqtt_client: MQTTClient):
         self.mqtt_client = mqtt_client
 
     def exit_gracefully(self):
