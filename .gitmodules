@@ -1,0 +1,3 @@
+[submodule "adc_cal"]
+	path = adc_cal
+	url = https://github.com/matthias-bs/MicroPython-ADC_Cal.git
