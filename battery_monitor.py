@@ -1,7 +1,7 @@
 """Contains the battery monitor class"""
 import json
 from machine import ADC, Pin
-from mqtt_as.mqtt_as import MQTTClient
+from .micropython_mqtt.mqtt_as.mqtt_as import MQTTClient
 from .adc_cal.adc1_cal import ADC1Cal
 
 
@@ -50,7 +50,7 @@ class BatteryMonitor:
         self.state_topic = parent_topic + "/battery_level"
 
 
-    async def read(self):
+    async def read(self,publish_handle):
         """Reads the sensor"""
         print("Reading battery level")
 
@@ -73,10 +73,9 @@ class BatteryMonitor:
             "value": self.voltage_reading,
             "valid_reading": valid_reading,
         }
-        print(f"Message to send: {json.dumps(payload_json)}")
-        await self.mqtt_client.publish(
+        await publish_handle(
             topic=self.state_topic,
             msg=json.dumps(payload_json),
             retain=True,
-        )
+            )
 

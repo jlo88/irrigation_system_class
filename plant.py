@@ -3,7 +3,7 @@ import json
 from machine import ADC, Pin, Signal
 
 import uasyncio as asyncio
-from mqtt_as.mqtt_as import MQTTClient
+from .micropython_mqtt.mqtt_as.mqtt_as import MQTTClient
 
 # pylint: disable=broad-exception-raised
 
@@ -70,7 +70,7 @@ class Plant:
         self.watering_time_s = None
         self.watering_threshold_pct = None
 
-    async def read(self):
+    async def read(self,publish_handle):
         """Reads the sensor and updates the moisture"""
         print(f"Reading moisture level of {self.name}")
 
@@ -107,27 +107,25 @@ class Plant:
             "valid_reading": valid_reading_payload,
             "valve_pin_no": self.valve_pin_no,
         }
-        print(f"Message to send: {json.dumps(payload_json)}")
-        await self.mqtt_client.publish(
+        await publish_handle(
             topic=self.state_topic,
             msg=json.dumps(payload_json),
             retain=True,
-        )
-
+            )
         return self.moisture
 
-    async def check_if_dry(self):
+    async def check_if_dry(self,publish_handle):
         """Checks if a plant is dry"""
         if self.watering_threshold_pct is None:
             print("Cannot read because watering threshold is set to None")
             return
 
-        await self.read()
+        await self.read(publish_handle)
         return self.moisture < self.watering_threshold_pct
 
-    async def water(self):
+    async def water(self,publish_handle):
         """Performs watering by opening the valve for the specified amount of seconds"""
-        is_dry = await self.check_if_dry()
+        is_dry = await self.check_if_dry(publish_handle)
         if not is_dry:
             print(
                 f"{self.name} does not have to be watered because moisture level of {self.moisture:.1f}[%] is more than the configured threshold of {self.watering_threshold_pct:.1f}[%]"

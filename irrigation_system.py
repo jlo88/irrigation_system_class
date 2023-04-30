@@ -1,13 +1,13 @@
 """Contains the irrigation system program"""
+# pylint: disable=broad-exception-raised,relative-beyond-top-level
 import json
 import network
 from utime import ticks_diff, ticks_ms
-from machine import Pin, Signal, deepsleep
+from machine import Pin, Signal, deepsleep, reset
 
 import uasyncio as asyncio
-from mqtt_as.mqtt_as import MQTTClient
+from .micropython_mqtt.mqtt_as.mqtt_as import MQTTClient
 from .battery_monitor import BatteryMonitor
-# pylint: disable=broad-exception-raised
 
 
 class Irrigation:
@@ -43,6 +43,7 @@ class Irrigation:
         print(f"Setting up mqtt connection with configuration: {mqtt_config}")
         self.mqtt_client = MQTTClient(mqtt_config)
         self.mqtt_client.DEBUG = False
+        self.mqtt_connectivity_timeout = 200
 
         # Set up plants
         self.plants = plants
@@ -110,9 +111,48 @@ class Irrigation:
         if self.battery_monitor is not None:
             self.battery_monitor.define_mqtt_client(self.mqtt_client,main_topic)
 
+        # Time-out definition
+        self.time_out_time = 5
+
     def printd(self, msg):
         if self.debug:
             print(msg)
+
+    async def subscribe_with_timeout(self,topic):
+        """Subscribes to a topic and defers to reconnect on a time-out"""
+        try:
+            await asyncio.wait_for(self.mqtt_client.subscribe(topic, 1),self.time_out_time)
+            print(f"Subscribed to {topic}")
+        except asyncio.TimeoutError:
+            print(f"Failed to subscribe to {topic} because time-out of {self.time_out_time} has expired")
+            await self.wait_until_connected()
+        except Exception as e:
+            print(f"Failed to subscribe to {topic} because of exception {e}")
+
+    async def publish_with_timeout(self,topic,msg,retain=True):
+        """PUblishes a message to a topic with a time-out and defers to reconnect on a time-out"""
+        try:
+            print(f"Publishing {msg} on {topic}")
+            await asyncio.wait_for(self.mqtt_client.publish(topic, msg, retain=retain),self.time_out_time)
+        except asyncio.TimeoutError:
+            print(f"Failed to publish {msg} to {topic} because time-out of {self.time_out_time} has expired")
+            await self.wait_until_connected()
+        except Exception as e:
+            print(f"Failed to publish to {topic} because of exception {e}")
+
+    async def wait_until_connected(self):
+        """Waits until connected, if the time-out expires, reboot the device"""
+        print("Checking MQTT connection status")
+        cnt = 0
+        while not self.mqtt_client.isconnected():
+            print("Waiting for MQTT connection, waiting 1s")
+            cnt += 1
+            if cnt < self.mqtt_connectivity_timeout:
+                await asyncio.sleep_ms(1000)
+            else:
+                print(f"Rebooting because MQTT timeout of {self.mqtt_connectivity_timeout} was exceeded")
+                reset()
+        print("MQTT connected!")
 
     async def mqtt_connect(self, client):
         """Handles establishing an mqtt connection"""
@@ -121,25 +161,16 @@ class Irrigation:
         )
         # Subscribe to threshold and watering time updates
         for plant in self.plants:
-            await client.subscribe(plant.threshold_topic, 1)
-            print(f"Subscribed to {plant.threshold_topic}")
-            await client.subscribe(plant.time_topic, 1)
-            print(f"Subscribed to {plant.time_topic}")
-
+            await self.subscribe_with_timeout(plant.threshold_topic)
+            await self.subscribe_with_timeout(plant.time_topic)
 
         # Subscribe to watering switch
-        await client.publish(self.mqtt_switch_available_topic, "online", retain=True)
-        await client.subscribe(self.mqtt_switch_command_topic, 1)
-        print(
-            f"Subscribed to {self.mqtt_switch_command_topic} topic"
-        )
+        await self.publish_with_timeout(self.mqtt_switch_available_topic, "online", retain=True)
+        await self.subscribe_with_timeout(self.mqtt_switch_command_topic)
 
         # Subscribe to energy saving mode switch
-        await client.publish(self.mqtt_energy_saver_available_topic, "online", retain=True)
-        await client.subscribe(self.mqtt_energy_saver_command_topic, 1)
-        print(
-            f"Subscribed to {self.mqtt_energy_saver_command_topic} topic"
-        )
+        await self.publish_with_timeout(self.mqtt_energy_saver_available_topic, "online", retain=True)
+        await self.subscribe_with_timeout(self.mqtt_energy_saver_command_topic)
 
     def mqtt_message_received(self, topic, payload, _):
         """Handles received mqtt messages"""
@@ -155,7 +186,7 @@ class Irrigation:
             if payload == "ON" or payload == "OFF":
                 # Publishes back the state, needs to be asynchronous as well:
                 self.event_loop.create_task(
-                    self.mqtt_client.publish(
+                    self.publish_with_timeout(
                         self.mqtt_switch_topic, payload, retain=True
                     )
                 )
@@ -180,27 +211,15 @@ class Irrigation:
         if topic == self.mqtt_energy_saver_command_topic:
             if self.developer_mode:
                 print("Cannot set energy saving mode in developer mode as this would lead to connectivity problems")
-                self.event_loop.create_task(
-                    self.mqtt_client.publish(
-                        self.mqtt_energy_saver_topic, "OFF", retain=True
-                    )
-                )
+                self.event_loop.create_task(self.publish_with_timeout(self.mqtt_energy_saver_topic, "OFF", retain=True))
                 self.loop_time_ms = self.loop_time_developer_mode
             elif payload == "ON":
-                self.event_loop.create_task(
-                    self.mqtt_client.publish(
-                        self.mqtt_energy_saver_topic, payload, retain=True
-                    )
-                )
+                self.event_loop.create_task(self.publish_with_timeout(self.mqtt_energy_saver_topic, payload, retain=True))
                 self.energy_saving_mode = True
                 print("Switching energy saving mode on")
                 self.loop_time_ms = self.loop_time_energy_saving_ms
             elif payload == "OFF":
-                self.event_loop.create_task(
-                    self.mqtt_client.publish(
-                        self.mqtt_energy_saver_topic, payload, retain=True
-                    )
-                )
+                self.event_loop.create_task(self.publish_with_timeout(self.mqtt_energy_saver_topic, payload, retain=True))
                 self.energy_saving_mode = False
                 print("Switching energy saving mode off")
                 self.loop_time_ms = self.loop_time_normal_ms
@@ -218,7 +237,7 @@ class Irrigation:
     async def run_mqtt(self):
         """Runs mqtt"""
         print("Starting mqtt client")
-        await self.mqtt_client.connect()
+        await self.mqtt_client.connect(quick=True)
         print("Done")
 
     async def run_sensor_reading_loop(self):
@@ -229,10 +248,7 @@ class Irrigation:
             start = ticks_ms()
 
             # Wait until connected
-            while not self.mqtt_client.isconnected():
-                print("Waiting for MQTT connection, waiting 1s")
-                await asyncio.sleep_ms(1000)
-
+            await self.wait_until_connected()
             await self.sensor_reading_loop()
 
             # Calculate sleep time
@@ -247,10 +263,11 @@ class Irrigation:
 
             # Go to deep-sleep in the energy saving mode
             if self.energy_saving_mode and not self.developer_mode and not self.watering:
-                self.printd(f"Deep sleeping for {sleep_time_ms} [ms]")
+                print(f"Deep sleeping for {sleep_time_ms} [ms]")
+                await self.mqtt_client.disconnect()
                 deepsleep(int(self.loop_time_ms))
             else:
-                self.printd(f"Sleeping for {sleep_time_ms} [ms]")
+                print(f"Sleeping for {sleep_time_ms} [ms]")
                 await asyncio.sleep_ms(int(self.loop_time_ms))
 
     async def sensor_reading_loop(self):
@@ -259,7 +276,7 @@ class Irrigation:
         for n, plant in enumerate(self.plants):
             self.printd(f"Reading plant #{n}")
             try:
-                await plant.read()
+                await plant.read(self.publish_with_timeout)
             except Exception as e:
                 print(f"Failed to read plant {n} because of {e}")
 
@@ -273,7 +290,7 @@ class Irrigation:
         # Read battery level
         if self.battery_monitor is not None:
             try:
-                await self.battery_monitor.read()
+                await self.battery_monitor.read(self.publish_with_timeout)
             except Exception as e:
                 print(f"Failed to read battery level because of {e}")
 
@@ -284,7 +301,7 @@ class Irrigation:
                 "rssi": network.WLAN().status("rssi"),
             }
             self.event_loop.create_task(
-                self.mqtt_client.publish(
+                self.publish_with_timeout(
                     self.mqtt_status_topic, json.dumps(payload_json), retain=True
                 )
             )
@@ -328,7 +345,7 @@ class Irrigation:
         for n, plant in enumerate(self.plants):
             print(f"Checking plant #{n}")
             if self.watering:
-                is_dry = await plant.check_if_dry()
+                is_dry = await plant.check_if_dry(self.publish_with_timeout)
                 if is_dry:
                     break
         if is_dry:
@@ -338,10 +355,10 @@ class Irrigation:
             self.watering = False
             # Publish watering state off
             self.event_loop.create_task(
-                self.mqtt_client.publish(self.mqtt_switch_topic, "OFF", retain=True)
+                self.publish_with_timeout(self.mqtt_switch_topic, "OFF", retain=True)
             )
             self.event_loop.create_task(
-                self.mqtt_client.publish(self.mqtt_switch_command_topic, "OFF", retain=True)
+                self.publish_with_timeout(self.mqtt_switch_command_topic, "OFF", retain=True)
             )
             return
 
@@ -354,7 +371,7 @@ class Irrigation:
         for n, plant in enumerate(self.plants):
             print(f"Watering plant #{n}")
             if self.watering:
-                await plant.water()
+                await plant.water(self.publish_with_timeout)
 
         # Switch off again
         print("Finished watering sequence")
@@ -364,20 +381,20 @@ class Irrigation:
         """Check if there is water in the reservoir"""
         # Set sensor online
         self.event_loop.create_task(
-            self.mqtt_client.publish(
+            self.publish_with_timeout(
                 self.water_level_topic_availability, "online", retain=True
             )
         )
         if self.water_level_pin.value() == 0:
             print("Publish water empty")
             self.event_loop.create_task(
-                self.mqtt_client.publish(self.water_level_topic, "OFF", retain=True)
+                self.publish_with_timeout(self.water_level_topic, "OFF", retain=True)
             )
             return False
         else:
             print("Publish water full")
             self.event_loop.create_task(
-                self.mqtt_client.publish(self.water_level_topic, "ON", retain=True)
+                self.publish_with_timeout(self.water_level_topic, "ON", retain=True)
             )
             return True
 
@@ -393,11 +410,11 @@ class Irrigation:
         # Publish watering state off
         print("Publish watering status off")
         self.event_loop.create_task(
-            self.mqtt_client.publish(self.mqtt_switch_topic, "OFF", retain=True)
+            self.publish_with_timeout(self.mqtt_switch_topic, "OFF", retain=True)
         )
         if publish_set_off:
             self.event_loop.create_task(
-                self.mqtt_client.publish(self.mqtt_switch_command_topic, "OFF", retain=True)
+                self.publish_with_timeout(self.mqtt_switch_command_topic, "OFF", retain=True)
             )
         return
 
@@ -421,20 +438,20 @@ class Irrigation:
         print("Disconnecting from mqtt")
         print(f"Publishing 'offline' to {self.mqtt_switch_available_topic}")
         self.event_loop.run_until_complete(
-            self.mqtt_client.publish(
+            self.publish_with_timeout(
                 topic=self.mqtt_switch_available_topic, msg="offline", retain=True
             )
         )
         if self.water_level_topic_availability is not None:
             print(f"Publishing 'offline' to {self.water_level_topic_availability}")
             self.event_loop.run_until_complete(
-                self.mqtt_client.publish(
+                self.publish_with_timeout(
                     self.water_level_topic_availability, msg="offline", retain=True
                 )
             )
         print(f"Publishing 'offline' to {self.mqtt_energy_saver_available_topic}")
         self.event_loop.run_until_complete(
-            self.mqtt_client.publish(
+            self.publish_with_timeout(
                 self.mqtt_energy_saver_available_topic, msg="offline", retain=True
             )
         )
