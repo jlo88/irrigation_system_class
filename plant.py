@@ -35,6 +35,7 @@ class Plant:
         self.moisture = None
         self.reading_bits = None
         self.watering = False
+        self.valid_reading = True
 
         # Pins
         allowed_adc_pins = list(range(32, 40))
@@ -82,10 +83,12 @@ class Plant:
 
         # Do a range check
         valid_reading_payload = "ON"
+        self.valid_reading = True
         if self.reading_bits < self.min_value or self.reading_bits > self.max_value:
             valid_reading_payload = "OFF"
+            self.valid_reading = False
             print(
-                f"{self.name} reading is out of range! Got {self.reading_bits} bits but should be between {self.min_value} and {self.max_value}"
+                f"[WARNING] {self.name} reading is out of range! Got {self.reading_bits} bits but should be between {self.min_value} and {self.max_value}"
             )
 
         # Convert to percentages
@@ -112,16 +115,16 @@ class Plant:
             msg=json.dumps(payload_json),
             retain=True,
             )
-        return self.moisture
+        return self.moisture, self.valid_reading
 
     async def check_if_dry(self,publish_handle):
         """Checks if a plant is dry"""
         if self.watering_threshold_pct is None:
-            print("Cannot read because watering threshold is set to None")
+            print("[WARNING] Cannot read because watering threshold is set to None")
             return
 
         await self.read(publish_handle)
-        return self.moisture < self.watering_threshold_pct
+        return self.moisture < self.watering_threshold_pct, self.valid_reading
 
     async def water(self,publish_handle):
         """Performs watering by opening the valve for the specified amount of seconds"""
@@ -141,7 +144,7 @@ class Plant:
             self.watering = False
             print(f"Finished watering {self.name}")
         else:
-            print("Cannot water because watering time is set to None")
+            print("[WARNING] Cannot water because watering time is set to None")
 
     def define_mqtt_client(self, mqtt_client: MQTTClient):
         self.mqtt_client = mqtt_client

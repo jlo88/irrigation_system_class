@@ -33,12 +33,8 @@ class Irrigation:
         mqtt_config["subs_cb"] = self.mqtt_message_received
         mqtt_config["connect_coro"] = self.mqtt_connect
         self.mqtt_main_topic = main_topic
-        self.mqtt_switch_topic = f"{main_topic}/switch"
+        self.mqtt_watering_switch_topic = f"{main_topic}/watering_switch"
         self.mqtt_energy_saver_topic = f"{main_topic}/energy_saver_switch"
-        self.mqtt_energy_saver_command_topic = f"{self.mqtt_energy_saver_topic}/set"
-        self.mqtt_energy_saver_available_topic = f"{self.mqtt_energy_saver_topic}/available"
-        self.mqtt_switch_command_topic = self.mqtt_switch_topic + "/set"
-        self.mqtt_switch_available_topic = self.mqtt_switch_topic + "/available"
         self.mqtt_status_topic = main_topic + "/connectivity_status"
         print(f"Setting up mqtt connection with configuration: {mqtt_config}")
         self.mqtt_client = MQTTClient(mqtt_config)
@@ -65,8 +61,8 @@ class Irrigation:
 
         # Set up water level pin
         self.water_level_pin = water_level_pin
-        self.water_level_topic = None
-        self.water_level_topic_availability = None
+        self.water_empty_topic = None
+        self.water_empty_topic_availability = None
         if self.water_level_pin is not None:
             if self.water_level_pin in plant_pins:
                 raise Exception(
@@ -77,9 +73,9 @@ class Irrigation:
             self.water_level_pin = Pin(self.water_level_pin, Pin.IN, Pin.PULL_UP)
 
             # Set MQTT topic
-            self.water_level_topic = f"{main_topic}/water_empty"
-            self.water_level_topic_availability = (
-                f"{self.water_level_topic}/availability"
+            self.water_empty_topic = f"{main_topic}/water_empty"
+            self.water_empty_topic_availability = (
+                f"{self.water_empty_topic}/availability"
             )
 
         # Set up energy saving mode
@@ -165,12 +161,10 @@ class Irrigation:
             await self.subscribe_with_timeout(plant.time_topic)
 
         # Subscribe to watering switch
-        await self.publish_with_timeout(self.mqtt_switch_available_topic, "online", retain=True)
-        await self.subscribe_with_timeout(self.mqtt_switch_command_topic)
+        await self.subscribe_with_timeout(self.mqtt_watering_switch_topic)
 
         # Subscribe to energy saving mode switch
-        await self.publish_with_timeout(self.mqtt_energy_saver_available_topic, "online", retain=True)
-        await self.subscribe_with_timeout(self.mqtt_energy_saver_command_topic)
+        await self.subscribe_with_timeout(self.mqtt_energy_saver_topic)
 
     def mqtt_message_received(self, topic, payload, _):
         """Handles received mqtt messages"""
@@ -182,20 +176,12 @@ class Irrigation:
         self.printd(f"Message {payload} received on {topic}")
 
         # Handle watering switch
-        if topic == self.mqtt_switch_command_topic:
-            if payload == "ON" or payload == "OFF":
-                # Publishes back the state, needs to be asynchronous as well:
-                self.event_loop.create_task(
-                    self.publish_with_timeout(
-                        self.mqtt_switch_topic, payload, retain=True
-                    )
-                )
-
-            if payload == "ON":
+        if topic == self.mqtt_watering_switch_topic:
+            if payload == "ON" and not self.watering:
                 self.watering_task = self.event_loop.create_task(self.water())
                 return
             elif payload == "OFF":
-                self.cancel_watering(publish_set_off=False)
+                self.cancel_watering()
                 return
             else:
                 print(
@@ -208,18 +194,22 @@ class Irrigation:
                 return
 
         # Handle energy saving mode update:
-        if topic == self.mqtt_energy_saver_command_topic:
+        if topic == self.mqtt_energy_saver_topic:
             if self.developer_mode:
                 print("Cannot set energy saving mode in developer mode as this would lead to connectivity problems")
-                self.event_loop.create_task(self.publish_with_timeout(self.mqtt_energy_saver_topic, "OFF", retain=True))
+                if self.energy_saving_mode: # Only publish when the state changes
+                    self.event_loop.create_task(self.publish_with_timeout(self.mqtt_energy_saver_topic, "OFF", retain=True))
                 self.loop_time_ms = self.loop_time_developer_mode
+                self.energy_saving_mode = False
             elif payload == "ON":
-                self.event_loop.create_task(self.publish_with_timeout(self.mqtt_energy_saver_topic, payload, retain=True))
+                if not self.energy_saving_mode: # Only publish when the state changes
+                    self.event_loop.create_task(self.publish_with_timeout(self.mqtt_energy_saver_topic, payload, retain=True))
                 self.energy_saving_mode = True
                 print("Switching energy saving mode on")
                 self.loop_time_ms = self.loop_time_energy_saving_ms
             elif payload == "OFF":
-                self.event_loop.create_task(self.publish_with_timeout(self.mqtt_energy_saver_topic, payload, retain=True))
+                if self.energy_saving_mode: # Only publish when the state changes:
+                    self.event_loop.create_task(self.publish_with_timeout(self.mqtt_energy_saver_topic, payload, retain=True))
                 self.energy_saving_mode = False
                 print("Switching energy saving mode off")
                 self.loop_time_ms = self.loop_time_normal_ms
@@ -323,7 +313,7 @@ class Irrigation:
         print("Done")
 
         # Publish off state:
-        self.cancel_watering(publish_set_off=False)
+        self.cancel_watering()
 
         # Start the event loop:
         print("Starting the event loop")
@@ -335,7 +325,7 @@ class Irrigation:
         if self.water_level_pin is not None:
             if not self.check_water_level():
                 print("Water is empty, aborting watering sequence")
-                self.finish_watering(publish_set_off=True)
+                self.finish_watering()
                 return
             else:
                 print("Water level OK")
@@ -345,20 +335,20 @@ class Irrigation:
         for n, plant in enumerate(self.plants):
             print(f"Checking plant #{n}")
             if self.watering:
-                is_dry = await plant.check_if_dry(self.publish_with_timeout)
-                if is_dry:
+                is_dry, valid_reading = await plant.check_if_dry(self.publish_with_timeout)
+                if is_dry and valid_reading:
                     break
-        if is_dry:
+        if is_dry and valid_reading:
             print("At least one plant is dry, starting watering")
         else:
             print("No dry plants were detected, aborting")
             self.watering = False
             # Publish watering state off
             self.event_loop.create_task(
-                self.publish_with_timeout(self.mqtt_switch_topic, "OFF", retain=True)
+                self.publish_with_timeout(self.mqtt_watering_switch_topic, "OFF", retain=True)
             )
             self.event_loop.create_task(
-                self.publish_with_timeout(self.mqtt_switch_command_topic, "OFF", retain=True)
+                self.publish_with_timeout(self.mqtt_watering_switch_topic, "OFF", retain=True)
             )
             return
 
@@ -375,33 +365,32 @@ class Irrigation:
 
         # Switch off again
         print("Finished watering sequence")
-        self.finish_watering(publish_set_off=True)
+        self.finish_watering()
 
     def check_water_level(self):
         """Check if there is water in the reservoir"""
         # Set sensor online
         self.event_loop.create_task(
             self.publish_with_timeout(
-                self.water_level_topic_availability, "online", retain=True
+                self.water_empty_topic_availability, "online", retain=True
             )
         )
         if self.water_level_pin.value() == 0:
             print("Publish water empty")
             self.event_loop.create_task(
-                self.publish_with_timeout(self.water_level_topic, "OFF", retain=True)
+                self.publish_with_timeout(self.water_empty_topic, "ON", retain=True)
             )
             return False
         else:
             print("Publish water full")
             self.event_loop.create_task(
-                self.publish_with_timeout(self.water_level_topic, "ON", retain=True)
+                self.publish_with_timeout(self.water_empty_topic, "OFF", retain=True)
             )
             return True
 
-    def finish_watering(self, publish_set_off=False):
+    def finish_watering(self):
         """Finished the watering sequence"""
         print("Finishing watering sequence")
-        self.watering = False
 
         # Switch off pump
         print("Switching off pump")
@@ -409,16 +398,15 @@ class Irrigation:
 
         # Publish watering state off
         print("Publish watering status off")
-        self.event_loop.create_task(
-            self.publish_with_timeout(self.mqtt_switch_topic, "OFF", retain=True)
-        )
-        if publish_set_off:
+        if self.watering:
             self.event_loop.create_task(
-                self.publish_with_timeout(self.mqtt_switch_command_topic, "OFF", retain=True)
+                self.publish_with_timeout(self.mqtt_watering_switch_topic, "OFF", retain=True)
             )
-        return
 
-    def cancel_watering(self,publish_set_off=True):
+        # Set internal state to off
+        self.watering = False
+
+    def cancel_watering(self):
         """Cancel a running watering sequence"""
         # Cancel running tasks:
         if self.watering_task is not None:
@@ -429,32 +417,13 @@ class Irrigation:
             plant.pin_valve.off()
 
         # Normal finish:
-        self.finish_watering(publish_set_off=publish_set_off)
+        self.finish_watering()
 
     def exit_gracefully(self):
         """Exits gracefully"""
         print("Stopping gracefully")
 
         print("Disconnecting from mqtt")
-        print(f"Publishing 'offline' to {self.mqtt_switch_available_topic}")
-        self.event_loop.run_until_complete(
-            self.publish_with_timeout(
-                topic=self.mqtt_switch_available_topic, msg="offline", retain=True
-            )
-        )
-        if self.water_level_topic_availability is not None:
-            print(f"Publishing 'offline' to {self.water_level_topic_availability}")
-            self.event_loop.run_until_complete(
-                self.publish_with_timeout(
-                    self.water_level_topic_availability, msg="offline", retain=True
-                )
-            )
-        print(f"Publishing 'offline' to {self.mqtt_energy_saver_available_topic}")
-        self.event_loop.run_until_complete(
-            self.publish_with_timeout(
-                self.mqtt_energy_saver_available_topic, msg="offline", retain=True
-            )
-        )
         self.mqtt_client.disconnect()
         print("Done")
 
