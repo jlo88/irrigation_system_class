@@ -1,11 +1,12 @@
 """Contains the battery monitor class"""
+# pylint: disable=broad-exception-raised,relative-beyond-top-level
+# pyright: reportMissingImports=false
+
 import json
-from machine import ADC, Pin
-from .micropython_mqtt.mqtt_as.mqtt_as import MQTTClient
+from machine import ADC, Pin # pylint: disable=import-error
+from .mqtt_client import MQTTClientWithTimeOut as MQTTClient
 from .adc_cal.adc1_cal import ADC1Cal
 
-
-# pylint: disable=broad-exception-raised
 
 class BatteryMonitor:
     """Battery monitoring class"""
@@ -50,7 +51,7 @@ class BatteryMonitor:
         self.state_topic = parent_topic + "/battery_level"
 
 
-    async def read(self,publish_handle):
+    async def read(self):
         """Reads the sensor"""
         print("Reading battery level")
 
@@ -73,7 +74,7 @@ class BatteryMonitor:
             "value": self.voltage_reading,
             "valid_reading": valid_reading,
         }
-        await publish_handle(
+        await self.mqtt_client.publish_with_timeout(
             topic=self.state_topic,
             msg=json.dumps(payload_json),
             retain=True,

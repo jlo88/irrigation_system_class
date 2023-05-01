@@ -1,9 +1,12 @@
 """Contains the plant class"""
-import json
-from machine import ADC, Pin, Signal
+# pylint: disable=broad-exception-raised,relative-beyond-top-level
+# pyright: reportMissingImports=false
 
-import uasyncio as asyncio
-from .micropython_mqtt.mqtt_as.mqtt_as import MQTTClient
+import json
+from machine import ADC, Pin, Signal # pylint: disable=import-error
+
+import uasyncio as asyncio # pylint: disable=import-error
+from .mqtt_client import MQTTClientWithTimeOut as MQTTClient
 
 # pylint: disable=broad-exception-raised
 
@@ -71,7 +74,7 @@ class Plant:
         self.watering_time_s = None
         self.watering_threshold_pct = None
 
-    async def read(self,publish_handle):
+    async def read(self):
         """Reads the sensor and updates the moisture"""
         print(f"Reading moisture level of {self.name}")
 
@@ -110,25 +113,25 @@ class Plant:
             "valid_reading": valid_reading_payload,
             "valve_pin_no": self.valve_pin_no,
         }
-        await publish_handle(
+        await self.mqtt_client.publish_with_timeout(
             topic=self.state_topic,
             msg=json.dumps(payload_json),
             retain=True,
             )
         return self.moisture, self.valid_reading
 
-    async def check_if_dry(self,publish_handle):
+    async def check_if_dry(self):
         """Checks if a plant is dry"""
         if self.watering_threshold_pct is None:
             print("[WARNING] Cannot read because watering threshold is set to None")
             return
 
-        await self.read(publish_handle)
+        await self.read()
         return self.moisture < self.watering_threshold_pct, self.valid_reading
 
-    async def water(self,publish_handle):
+    async def water(self):
         """Performs watering by opening the valve for the specified amount of seconds"""
-        is_dry = await self.check_if_dry(publish_handle)
+        is_dry = await self.check_if_dry()
         if not is_dry:
             print(
                 f"{self.name} does not have to be watered because moisture level of {self.moisture:.1f}[%] is more than the configured threshold of {self.watering_threshold_pct:.1f}[%]"
