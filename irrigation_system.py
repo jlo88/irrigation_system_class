@@ -308,14 +308,7 @@ class Irrigation:
             print("At least one plant is dry, starting watering")
         else:
             print("No dry plants were detected, aborting")
-            self.watering = False
-            # Publish watering state off
-            self.event_loop.create_task(
-                self.mqtt_client.publish_with_timeout(self.mqtt_watering_switch_topic, "OFF", retain=True)
-            )
-            self.event_loop.create_task(
-                self.mqtt_client.publish_with_timeout(self.mqtt_watering_switch_topic, "OFF", retain=True)
-            )
+            self.finish_watering()
             return
 
         print("Switching on pump")
