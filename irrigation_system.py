@@ -334,7 +334,7 @@ class Irrigation:
                 self.water_empty_topic_availability, "online", retain=True
             )
         )
-        if self.water_level_pin.value() == 0:
+        if self.water_level_pin.value() == 1:
             print("Publish water empty")
             self.event_loop.create_task(
                 self.mqtt_client.publish_with_timeout(self.water_empty_topic, "ON", retain=True)

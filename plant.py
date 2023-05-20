@@ -127,18 +127,24 @@ class Plant:
             return
 
         await self.read()
-        return self.moisture < self.watering_threshold_pct, self.valid_reading
+
+        is_dry = self.moisture < self.watering_threshold_pct
+        if is_dry:
+            print(f'{self.name} is dry because {self.moisture:.1f}<{self.watering_threshold_pct:.1f}')
+        else:
+            print(f'{self.name} is not dry because {self.moisture:.1f}>{self.watering_threshold_pct:.1f}')
+        return is_dry, self.valid_reading
 
     async def water(self):
         """Performs watering by opening the valve for the specified amount of seconds"""
-        is_dry = await self.check_if_dry()
+        is_dry, valid_reading = await self.check_if_dry()
         if not is_dry:
             print(
                 f"{self.name} does not have to be watered because moisture level of {self.moisture:.1f}[%] is more than the configured threshold of {self.watering_threshold_pct:.1f}[%]"
             )
             return
 
-        if self.watering_time_s is not None:
+        if self.watering_time_s is not None and valid_reading:
             print(f"Watering {self.name} for {self.watering_time_s} seconds")
             self.pin_valve.on()
             self.watering = True
@@ -147,7 +153,10 @@ class Plant:
             self.watering = False
             print(f"Finished watering {self.name}")
         else:
-            print("[WARNING] Cannot water because watering time is set to None")
+            if self.watering_time_s is None:
+                print(f"[WARNING] Cannot water because watering time is set to None for {self.name}")
+            elif not valid_reading:
+                print(f"[WARNING] Cannot water because of invalid reading of {self.name}")
 
     def define_mqtt_client(self, mqtt_client: MQTTClient):
         self.mqtt_client = mqtt_client
